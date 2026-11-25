@@ -1,0 +1,506 @@
+name: Build Aurora Launcher
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.2"
+      - name: Crear proyecto
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'AURORA_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AuroraLauncher"
+          include(":app")
+          AURORA_EOF
+          mkdir -p .
+          cat > build.gradle.kts <<'AURORA_EOF'
+          plugins {
+              id("com.android.application") version "8.2.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          AURORA_EOF
+          mkdir -p .
+          cat > gradle.properties <<'AURORA_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          AURORA_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'AURORA_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.aurora.launcher"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.aurora.launcher"
+                  minSdk = 21
+                  targetSdk = 33
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          AURORA_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'AURORA_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                  </intent>
+              </queries>
+              <application
+                  android:label="Aurora Launcher"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:resumeWhilePausing="true"
+                      android:configChanges="orientation|keyboardHidden|screenSize|uiMode|locale|layoutDirection">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          AURORA_EOF
+          mkdir -p app/src/main/java/com/aurora/launcher
+          cat > app/src/main/java/com/aurora/launcher/MainActivity.kt <<'AURORA_EOF'
+          package com.aurora.launcher
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.ApplicationInfo
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.StateListDrawable
+          import android.graphics.drawable.TransitionDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.FrameLayout
+          import android.widget.HorizontalScrollView
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextClock
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class AppItem(val pkg: String, val label: String, val icon: Drawable, val intent: Intent)
+
+          class MainActivity : Activity() {
+
+              private lateinit var prefs: SharedPreferences
+              private lateinit var bg: View
+              private lateinit var row: LinearLayout
+              private lateinit var bgLabel: TextView
+              private val handler = Handler(Looper.getMainLooper())
+              private var current: Drawable? = null
+              private var allApps: List<AppItem> = emptyList()
+              private var lastFocus: String? = null
+
+              private val palettes = listOf(
+                  intArrayOf(0xFF0F2027.toInt(), 0xFF203A43.toInt(), 0xFF2C5364.toInt()),
+                  intArrayOf(0xFF41295A.toInt(), 0xFF2F0743.toInt(), 0xFF8E2DE2.toInt()),
+                  intArrayOf(0xFF0F0C29.toInt(), 0xFF302B63.toInt(), 0xFF24243E.toInt()),
+                  intArrayOf(0xFF134E5E.toInt(), 0xFF1D976C.toInt(), 0xFF0B3D2E.toInt()),
+                  intArrayOf(0xFF3A1C71.toInt(), 0xFFD76D77.toInt(), 0xFFFFAF7B.toInt()),
+                  intArrayOf(0xFF200122.toInt(), 0xFF6F0000.toInt(), 0xFF1A1A2E.toInt()),
+                  intArrayOf(0xFF000428.toInt(), 0xFF004E92.toInt(), 0xFF00263F.toInt()),
+                  intArrayOf(0xFF232526.toInt(), 0xFF414345.toInt(), 0xFF0B0B0B.toInt())
+              )
+
+              private val rotate = object : Runnable {
+                  override fun run() {
+                      nextBackground()
+                      handler.postDelayed(this, 600_000L)
+                  }
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("aurora", MODE_PRIVATE)
+                  val match = ViewGroup.LayoutParams.MATCH_PARENT
+                  val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+
+                  val root = FrameLayout(this)
+                  bg = View(this)
+                  root.addView(bg, FrameLayout.LayoutParams(match, match))
+
+                  val scrim = View(this)
+                  scrim.background = GradientDrawable(
+                      GradientDrawable.Orientation.TOP_BOTTOM,
+                      intArrayOf(0x00000000, 0xE6000000.toInt())
+                  )
+                  root.addView(scrim, FrameLayout.LayoutParams(match, dp(400), Gravity.BOTTOM))
+
+                  // Reloj y fecha (arriba a la izquierda)
+                  val top = LinearLayout(this)
+                  top.orientation = LinearLayout.VERTICAL
+                  top.setPadding(dp(56), dp(36), 0, 0)
+                  val time = TextClock(this)
+                  time.format24Hour = "HH:mm"
+                  time.format12Hour = "HH:mm"
+                  time.textSize = 72f
+                  time.setTextColor(Color.WHITE)
+                  time.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                  val date = TextClock(this)
+                  date.format24Hour = "EEEE, d 'de' MMMM"
+                  date.format12Hour = "EEEE, d 'de' MMMM"
+                  date.textSize = 20f
+                  date.setTextColor(0xCCFFFFFF.toInt())
+                  top.addView(time)
+                  top.addView(date)
+                  root.addView(top, FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.START))
+
+                  // Contador de fondo (arriba a la derecha)
+                  bgLabel = TextView(this)
+                  bgLabel.textSize = 14f
+                  bgLabel.setTextColor(0x99FFFFFF.toInt())
+                  val lp = FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.END)
+                  lp.setMargins(0, dp(40), dp(56), 0)
+                  root.addView(bgLabel, lp)
+
+                  // Zona inferior
+                  val bottom = LinearLayout(this)
+                  bottom.orientation = LinearLayout.VERTICAL
+                  bottom.setPadding(dp(48), 0, dp(48), dp(28))
+                  val title = TextView(this)
+                  title.text = "APLICACIONES"
+                  title.textSize = 14f
+                  title.setTextColor(0xB3FFFFFF.toInt())
+                  title.typeface = Typeface.DEFAULT_BOLD
+                  title.setPadding(dp(8), 0, 0, 0)
+                  bottom.addView(title)
+
+                  val scroll = HorizontalScrollView(this)
+                  scroll.isHorizontalScrollBarEnabled = false
+                  scroll.overScrollMode = View.OVER_SCROLL_NEVER
+                  row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  scroll.addView(row)
+                  bottom.addView(scroll)
+
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.setPadding(0, dp(6), 0, 0)
+                  bar.addView(button("Cambiar fondo") { nextBackground() })
+                  bar.addView(button("Apps ocultas") { showHidden() })
+                  bar.addView(button("Ajustes Android") { openSettings() })
+                  bottom.addView(bar)
+                  root.addView(bottom, FrameLayout.LayoutParams(match, wrap, Gravity.BOTTOM))
+
+                  setContentView(root)
+                  applyBackground(false)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  render(lastFocus)
+                  handler.removeCallbacks(rotate)
+                  handler.postDelayed(rotate, 600_000L)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  handler.removeCallbacks(rotate)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  // Un launcher no se cierra con Atras
+              }
+
+              // ---------- Fondos ----------
+              private fun applyBackground(animate: Boolean) {
+                  val idx = prefs.getInt("bg", 0).mod(palettes.size)
+                  val g = GradientDrawable(GradientDrawable.Orientation.TL_BR, palettes[idx])
+                  val old = current
+                  if (animate && old != null) {
+                      val t = TransitionDrawable(arrayOf(old, g))
+                      bg.background = t
+                      t.startTransition(700)
+                  } else {
+                      bg.background = g
+                  }
+                  current = g
+                  bgLabel.text = "FONDO ${idx + 1} / ${palettes.size}"
+              }
+
+              private fun nextBackground() {
+                  prefs.edit().putInt("bg", (prefs.getInt("bg", 0) + 1) % palettes.size).apply()
+                  applyBackground(true)
+              }
+
+              // ---------- Apps ----------
+              private fun loadApps(): List<AppItem> {
+                  val pm = packageManager
+                  val map = LinkedHashMap<String, AppItem>()
+                  for (cat in listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)) {
+                      val i = Intent(Intent.ACTION_MAIN).addCategory(cat)
+                      for (ri in pm.queryIntentActivities(i, 0)) {
+                          val pkg = ri.activityInfo.packageName
+                          if (pkg == packageName || map.containsKey(pkg)) continue
+                          val launch = pm.getLeanbackLaunchIntentForPackage(pkg)
+                              ?: pm.getLaunchIntentForPackage(pkg) ?: continue
+                          map[pkg] = AppItem(pkg, ri.loadLabel(pm).toString(), ri.loadIcon(pm), launch)
+                      }
+                  }
+                  val order = (prefs.getString("order", "") ?: "").split("\n").filter { it.isNotEmpty() }
+                  return map.values.sortedWith(
+                      compareBy<AppItem>(
+                          { val i = order.indexOf(it.pkg); if (i < 0) Int.MAX_VALUE else i },
+                          { it.label.lowercase() }
+                      )
+                  )
+              }
+
+              private fun hiddenSet(): Set<String> = prefs.getStringSet("hidden", emptySet()) ?: emptySet()
+
+              private fun render(focusPkg: String?) {
+                  allApps = loadApps()
+                  val hidden = hiddenSet()
+                  row.removeAllViews()
+                  var target: View? = null
+                  for (a in allApps) {
+                      if (a.pkg in hidden) continue
+                      val c = makeCard(a)
+                      row.addView(c)
+                      if (a.pkg == focusPkg) target = c
+                  }
+                  val t = target ?: row.getChildAt(0)
+                  t?.post { t.requestFocus() }
+              }
+
+              private fun cardBg(): Drawable {
+                  val normal = GradientDrawable()
+                  normal.cornerRadius = dp(18).toFloat()
+                  normal.setColor(0x33FFFFFF)
+                  val focused = GradientDrawable()
+                  focused.cornerRadius = dp(18).toFloat()
+                  focused.setColor(0x66FFFFFF)
+                  focused.setStroke(dp(3), 0xFFFFFFFF.toInt())
+                  val s = StateListDrawable()
+                  s.addState(intArrayOf(android.R.attr.state_focused), focused)
+                  s.addState(intArrayOf(), normal)
+                  return s
+              }
+
+              private fun grow(v: View, scale: Float, extra: (Boolean) -> Unit = {}) {
+                  v.setOnFocusChangeListener { view, has ->
+                      val s = if (has) scale else 1f
+                      view.animate().scaleX(s).scaleY(s).setDuration(150).start()
+                      extra(has)
+                  }
+              }
+
+              private fun makeCard(app: AppItem): View {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  c.gravity = Gravity.CENTER_HORIZONTAL
+                  c.setPadding(dp(10), dp(14), dp(10), dp(8))
+                  c.background = cardBg()
+                  c.isFocusable = true
+                  c.isClickable = true
+                  c.isLongClickable = true
+                  val lp = LinearLayout.LayoutParams(dp(150), dp(158))
+                  lp.setMargins(dp(8), dp(16), dp(8), dp(16))
+                  c.layoutParams = lp
+
+                  val icon = ImageView(this)
+                  icon.setImageDrawable(app.icon)
+                  c.addView(icon, LinearLayout.LayoutParams(dp(72), dp(72)))
+
+                  val label = TextView(this)
+                  label.text = app.label
+                  label.textSize = 14f
+                  label.setTextColor(Color.WHITE)
+                  label.gravity = Gravity.CENTER
+                  label.maxLines = 2
+                  label.ellipsize = TextUtils.TruncateAt.END
+                  label.setPadding(0, dp(8), 0, 0)
+                  c.addView(label)
+
+                  grow(c, 1.12f) { has -> if (has) lastFocus = app.pkg }
+                  c.setOnClickListener { launch(app) }
+                  c.setOnLongClickListener { showMenu(app); true }
+                  return c
+              }
+
+              private fun button(text: String, onClick: () -> Unit): TextView {
+                  val b = TextView(this)
+                  b.text = text
+                  b.textSize = 16f
+                  b.setTextColor(Color.WHITE)
+                  b.gravity = Gravity.CENTER
+                  b.setPadding(dp(26), dp(12), dp(26), dp(12))
+                  b.background = cardBg()
+                  b.isFocusable = true
+                  b.isClickable = true
+                  val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  lp.setMargins(dp(8), dp(4), dp(8), dp(4))
+                  b.layoutParams = lp
+                  grow(b, 1.06f)
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              // ---------- Acciones ----------
+              private fun launch(app: AppItem) {
+                  try {
+                      startActivity(app.intent)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "No se pudo abrir ${app.label}", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+
+              private fun showMenu(app: AppItem) {
+                  val items = arrayOf(
+                      "Abrir", "Mover a la izquierda", "Mover a la derecha",
+                      "Ocultar", "Desinstalar", "Informaci\u00f3n de la app"
+                  )
+                  dialog().setTitle(app.label).setItems(items) { _, which ->
+                      when (which) {
+                          0 -> launch(app)
+                          1 -> move(app, -1)
+                          2 -> move(app, 1)
+                          3 -> hide(app)
+                          4 -> uninstall(app)
+                          5 -> info(app)
+                      }
+                  }.show()
+              }
+
+              private fun move(app: AppItem, delta: Int) {
+                  val hidden = hiddenSet()
+                  val vis = allApps.filter { it.pkg !in hidden }.map { it.pkg }.toMutableList()
+                  val i = vis.indexOf(app.pkg)
+                  val j = i + delta
+                  if (i < 0 || j < 0 || j >= vis.size) return
+                  vis.removeAt(i)
+                  vis.add(j, app.pkg)
+                  val rest = allApps.map { it.pkg }.filter { it in hidden }
+                  prefs.edit().putString("order", (vis + rest).joinToString("\n")).apply()
+                  render(app.pkg)
+              }
+
+              private fun hide(app: AppItem) {
+                  val s = HashSet(hiddenSet())
+                  s.add(app.pkg)
+                  prefs.edit().putStringSet("hidden", s).apply()
+                  lastFocus = null
+                  render(null)
+              }
+
+              private fun showHidden() {
+                  val hidden = hiddenSet()
+                  val list = allApps.filter { it.pkg in hidden }
+                  if (list.isEmpty()) {
+                      Toast.makeText(this, "No tienes apps ocultas", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val names = list.map { it.label }.toTypedArray()
+                  dialog().setTitle("Elige una app para mostrarla").setItems(names) { _, which ->
+                      val s = HashSet(hiddenSet())
+                      s.remove(list[which].pkg)
+                      prefs.edit().putStringSet("hidden", s).apply()
+                      render(list[which].pkg)
+                  }.show()
+              }
+
+              private fun uninstall(app: AppItem) {
+                  val isSystem = try {
+                      (packageManager.getApplicationInfo(app.pkg, 0).flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                  } catch (e: Exception) {
+                      false
+                  }
+                  if (isSystem) {
+                      Toast.makeText(this, "Es una app del sistema y no se puede desinstalar", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  dialog().setTitle("\u00bfDesinstalar ${app.label}?")
+                      .setPositiveButton("Desinstalar") { _, _ ->
+                          try {
+                              startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + app.pkg)))
+                          } catch (e: Exception) {
+                              Toast.makeText(this, "No se pudo desinstalar", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              private fun info(app: AppItem) {
+                  try {
+                      startActivity(
+                          Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + app.pkg))
+                      )
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "No se pudo abrir la informaci\u00f3n", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun openSettings() {
+                  try {
+                      startActivity(Intent(Settings.ACTION_SETTINGS))
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "No se pudieron abrir los ajustes", Toast.LENGTH_SHORT).show()
+                  }
+              }
+          }
+          AURORA_EOF
+      - name: Compilar APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AuroraLauncher-APK
+          path: app/build/outputs/apk/debug/app-debug.apk

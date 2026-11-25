@@ -1,0 +1,895 @@
+name: Build Aurora Launcher
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.2"
+      - name: Crear proyecto
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'AURORA_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AuroraLauncher"
+          include(":app")
+          AURORA_EOF
+          mkdir -p .
+          cat > build.gradle.kts <<'AURORA_EOF'
+          plugins {
+              id("com.android.application") version "8.2.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          AURORA_EOF
+          mkdir -p .
+          cat > gradle.properties <<'AURORA_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          AURORA_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'AURORA_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.aurora.launcher"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.aurora.launcher"
+                  minSdk = 21
+                  targetSdk = 33
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          AURORA_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'AURORA_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                  </intent>
+              </queries>
+              <application
+                  android:label="Aurora Launcher"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:resumeWhilePausing="true"
+                      android:configChanges="orientation|keyboardHidden|screenSize|uiMode|locale|layoutDirection">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          AURORA_EOF
+          mkdir -p app/src/main/java/com/aurora/launcher
+          cat > app/src/main/java/com/aurora/launcher/MainActivity.kt <<'AURORA_EOF'
+          package com.aurora.launcher
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.app.role.RoleManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.ApplicationInfo
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.FrameLayout
+          import android.widget.HorizontalScrollView
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextClock
+          import android.widget.TextView
+          import android.widget.Toast
+          import java.io.File
+
+          class AppItem(val pkg: String, val label: String, val icon: Drawable, val intent: Intent)
+
+          class MainActivity : Activity() {
+
+              private lateinit var prefs: SharedPreferences
+              private lateinit var cyber: CyberBg
+              private lateinit var row: LinearLayout
+              private lateinit var bar: LinearLayout
+              private lateinit var bgLabel: TextView
+              private lateinit var timeView: TextClock
+              private lateinit var title: TextView
+              private val handler = Handler(Looper.getMainLooper())
+              private var allApps: List<AppItem> = emptyList()
+              private var lastFocus: String? = null
+              private var acc1 = 0xFF00F0FF.toInt()
+              private var acc2 = 0xFFFF2BD6.toInt()
+
+              private val rotate = object : Runnable {
+                  override fun run() {
+                      nextBackground()
+                      handler.postDelayed(this, 600_000L)
+                  }
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("aurora", MODE_PRIVATE)
+                  val match = ViewGroup.LayoutParams.MATCH_PARENT
+                  val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
+
+                  val root = FrameLayout(this)
+                  cyber = CyberBg(this)
+                  root.addView(cyber, FrameLayout.LayoutParams(match, match))
+
+                  val scrim = View(this)
+                  scrim.background = GradientDrawable(
+                      GradientDrawable.Orientation.TOP_BOTTOM,
+                      intArrayOf(0x00000000, 0x99000000.toInt())
+                  )
+                  root.addView(scrim, FrameLayout.LayoutParams(match, dp(420), Gravity.BOTTOM))
+
+                  // Reloj y fecha
+                  val top = LinearLayout(this)
+                  top.orientation = LinearLayout.VERTICAL
+                  top.setPadding(dp(56), dp(30), 0, 0)
+                  timeView = TextClock(this)
+                  timeView.format24Hour = "HH:mm"
+                  timeView.format12Hour = "HH:mm"
+                  timeView.textSize = 84f
+                  timeView.setTextColor(Color.WHITE)
+                  timeView.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                  val date = TextClock(this)
+                  date.format24Hour = "EEEE, d 'de' MMMM"
+                  date.format12Hour = "EEEE, d 'de' MMMM"
+                  date.textSize = 22f
+                  date.letterSpacing = 0.08f
+                  date.setTextColor(0xDDFFFFFF.toInt())
+                  date.setPadding(dp(6), 0, 0, 0)
+                  top.addView(timeView)
+                  top.addView(date)
+                  root.addView(top, FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.START))
+
+                  bgLabel = TextView(this)
+                  bgLabel.textSize = 14f
+                  bgLabel.letterSpacing = 0.15f
+                  bgLabel.setTextColor(0xAAFFFFFF.toInt())
+                  val lp = FrameLayout.LayoutParams(wrap, wrap, Gravity.TOP or Gravity.END)
+                  lp.setMargins(0, dp(40), dp(56), 0)
+                  root.addView(bgLabel, lp)
+
+                  // Zona inferior
+                  val bottom = LinearLayout(this)
+                  bottom.orientation = LinearLayout.VERTICAL
+                  bottom.setPadding(dp(40), 0, dp(40), dp(20))
+                  title = TextView(this)
+                  title.text = "APLICACIONES"
+                  title.textSize = 15f
+                  title.letterSpacing = 0.3f
+                  title.typeface = Typeface.DEFAULT_BOLD
+                  title.setPadding(dp(20), 0, 0, 0)
+                  bottom.addView(title)
+
+                  val scroll = HorizontalScrollView(this)
+                  scroll.isHorizontalScrollBarEnabled = false
+                  scroll.overScrollMode = View.OVER_SCROLL_NEVER
+                  row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  scroll.addView(row)
+                  bottom.addView(scroll)
+
+                  val barScroll = HorizontalScrollView(this)
+                  barScroll.isHorizontalScrollBarEnabled = false
+                  bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.addView(button("Cambiar fondo") { nextBackground() })
+                  bar.addView(button("Hacer predeterminado") { makeDefault() })
+                  bar.addView(button("Apps ocultas") { showHidden() })
+                  bar.addView(button("Ajustes Android") { openSettings() })
+                  barScroll.addView(bar)
+                  bottom.addView(barScroll)
+                  root.addView(bottom, FrameLayout.LayoutParams(match, wrap, Gravity.BOTTOM))
+
+                  setContentView(root)
+                  applyBackground(false)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  render(lastFocus)
+                  handler.removeCallbacks(rotate)
+                  handler.postDelayed(rotate, 600_000L)
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  handler.removeCallbacks(rotate)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  // Un launcher no se cierra con Atras
+              }
+
+              // ---------- Fondos ----------
+              private fun sources(): List<Any> {
+                  val list = ArrayList<Any>(Art.themes)
+                  val dir = getExternalFilesDir("fondos")
+                  val files = dir?.listFiles { f ->
+                      val n = f.name.lowercase()
+                      f.isFile && (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp"))
+                  }
+                  files?.sortedBy { it.name }?.forEach { list.add(it) }
+                  return list
+              }
+
+              private fun applyBackground(animate: Boolean) {
+                  val list = sources()
+                  val idx = prefs.getInt("bg", 0).mod(list.size)
+                  val s = list[idx]
+                  cyber.show(s, animate)
+                  if (s is Theme) {
+                      acc1 = s.a1
+                      acc2 = s.a2
+                  } else {
+                      acc1 = Art.themes[0].a1
+                      acc2 = Art.themes[0].a2
+                  }
+                  bgLabel.text = "FONDO ${idx + 1} / ${list.size}" + (if (s is File) "  (TU IMAGEN)" else "")
+                  applyAccent()
+              }
+
+              private fun nextBackground() {
+                  val n = sources().size
+                  prefs.edit().putInt("bg", (prefs.getInt("bg", 0) + 1) % n).apply()
+                  applyBackground(true)
+              }
+
+              private fun applyAccent() {
+                  timeView.setShadowLayer(28f, 0f, 0f, acc1)
+                  title.setTextColor(acc1)
+                  for (g in listOf(row, bar)) {
+                      for (i in 0 until g.childCount) {
+                          (g.getChildAt(i).background as? GlassDrawable)?.setAccent(acc1, acc2)
+                      }
+                  }
+              }
+
+              // ---------- Apps ----------
+              private fun loadApps(): List<AppItem> {
+                  val pm = packageManager
+                  val map = LinkedHashMap<String, AppItem>()
+                  for (cat in listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)) {
+                      val i = Intent(Intent.ACTION_MAIN).addCategory(cat)
+                      for (ri in pm.queryIntentActivities(i, 0)) {
+                          val pkg = ri.activityInfo.packageName
+                          if (pkg == packageName || map.containsKey(pkg)) continue
+                          val launch = pm.getLeanbackLaunchIntentForPackage(pkg)
+                              ?: pm.getLaunchIntentForPackage(pkg) ?: continue
+                          map[pkg] = AppItem(pkg, ri.loadLabel(pm).toString(), ri.loadIcon(pm), launch)
+                      }
+                  }
+                  val order = (prefs.getString("order", "") ?: "").split("\n").filter { it.isNotEmpty() }
+                  return map.values.sortedWith(
+                      compareBy<AppItem>(
+                          { val i = order.indexOf(it.pkg); if (i < 0) Int.MAX_VALUE else i },
+                          { it.label.lowercase() }
+                      )
+                  )
+              }
+
+              private fun hiddenSet(): Set<String> = prefs.getStringSet("hidden", emptySet()) ?: emptySet()
+
+              private fun render(focusPkg: String?) {
+                  allApps = loadApps()
+                  val hidden = hiddenSet()
+                  row.removeAllViews()
+                  var target: View? = null
+                  for (a in allApps) {
+                      if (a.pkg in hidden) continue
+                      val c = makeCard(a)
+                      row.addView(c)
+                      if (a.pkg == focusPkg) target = c
+                  }
+                  val t = target ?: row.getChildAt(0)
+                  t?.post { t.requestFocus() }
+              }
+
+              private fun glass(pill: Boolean, inset: Int): GlassDrawable {
+                  val g = GlassDrawable(if (pill) -1f else dp(22).toFloat(), dp(inset).toFloat(), dp(2).toFloat())
+                  g.setAccent(acc1, acc2)
+                  return g
+              }
+
+              private fun grow(v: View, scale: Float, extra: (Boolean) -> Unit = {}) {
+                  v.setOnFocusChangeListener { view, has ->
+                      val s = if (has) scale else 1f
+                      view.animate().scaleX(s).scaleY(s).setDuration(150).start()
+                      extra(has)
+                  }
+              }
+
+              private fun makeCard(app: AppItem): View {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  c.gravity = Gravity.CENTER_HORIZONTAL
+                  c.setPadding(dp(20), dp(26), dp(20), dp(14))
+                  c.background = glass(false, 8)
+                  c.isFocusable = true
+                  c.isClickable = true
+                  c.isLongClickable = true
+                  val lp = LinearLayout.LayoutParams(dp(176), dp(186))
+                  lp.setMargins(dp(2), dp(14), dp(2), dp(10))
+                  c.layoutParams = lp
+
+                  val icon = ImageView(this)
+                  icon.setImageDrawable(app.icon)
+                  c.addView(icon, LinearLayout.LayoutParams(dp(76), dp(76)))
+
+                  val label = TextView(this)
+                  label.text = app.label
+                  label.textSize = 14f
+                  label.setTextColor(Color.WHITE)
+                  label.setShadowLayer(4f, 0f, 1f, 0xFF000000.toInt())
+                  label.gravity = Gravity.CENTER
+                  label.maxLines = 2
+                  label.ellipsize = TextUtils.TruncateAt.END
+                  label.setPadding(0, dp(10), 0, 0)
+                  c.addView(label)
+
+                  grow(c, 1.12f) { has -> if (has) lastFocus = app.pkg }
+                  c.setOnClickListener { launch(app) }
+                  c.setOnLongClickListener { showMenu(app); true }
+                  return c
+              }
+
+              private fun button(text: String, onClick: () -> Unit): TextView {
+                  val b = TextView(this)
+                  b.text = text
+                  b.textSize = 15f
+                  b.setTextColor(Color.WHITE)
+                  b.gravity = Gravity.CENTER
+                  b.setPadding(dp(28), dp(16), dp(28), dp(16))
+                  b.background = glass(true, 6)
+                  b.isFocusable = true
+                  b.isClickable = true
+                  val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  lp.setMargins(dp(4), dp(2), dp(4), dp(2))
+                  b.layoutParams = lp
+                  grow(b, 1.06f)
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              // ---------- Acciones ----------
+              private fun launch(app: AppItem) {
+                  try {
+                      startActivity(app.intent)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "No se pudo abrir ${app.label}", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+
+              private fun makeDefault() {
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          val rm = getSystemService(Context.ROLE_SERVICE) as RoleManager
+                          if (rm.isRoleHeld(RoleManager.ROLE_HOME)) {
+                              Toast.makeText(this, "Aurora ya es tu launcher predeterminado", Toast.LENGTH_LONG).show()
+                              return
+                          }
+                          if (rm.isRoleAvailable(RoleManager.ROLE_HOME)) {
+                              startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_HOME), 77)
+                              return
+                          }
+                      }
+                  } catch (e: Exception) {
+                  }
+                  try {
+                      startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
+                      return
+                  } catch (e: Exception) {
+                  }
+                  dialog().setTitle("Hacer predeterminado")
+                      .setMessage(
+                          "Ve a Ajustes > Aplicaciones > tu launcher actual > Borrar valores predeterminados. " +
+                              "Luego pulsa Inicio y elige Aurora > Siempre.\n\n" +
+                              "Con ADB:\nadb shell cmd package set-home-activity com.aurora.launcher/.MainActivity"
+                      )
+                      .setPositiveButton("OK", null)
+                      .show()
+              }
+
+              private fun showMenu(app: AppItem) {
+                  val items = arrayOf(
+                      "Abrir", "Mover a la izquierda", "Mover a la derecha",
+                      "Ocultar", "Desinstalar", "Informaci\u00f3n de la app"
+                  )
+                  dialog().setTitle(app.label).setItems(items) { _, which ->
+                      when (which) {
+                          0 -> launch(app)
+                          1 -> move(app, -1)
+                          2 -> move(app, 1)
+                          3 -> hide(app)
+                          4 -> uninstall(app)
+                          5 -> info(app)
+                      }
+                  }.show()
+              }
+
+              private fun move(app: AppItem, delta: Int) {
+                  val hidden = hiddenSet()
+                  val vis = allApps.filter { it.pkg !in hidden }.map { it.pkg }.toMutableList()
+                  val i = vis.indexOf(app.pkg)
+                  val j = i + delta
+                  if (i < 0 || j < 0 || j >= vis.size) return
+                  vis.removeAt(i)
+                  vis.add(j, app.pkg)
+                  val rest = allApps.map { it.pkg }.filter { it in hidden }
+                  prefs.edit().putString("order", (vis + rest).joinToString("\n")).apply()
+                  render(app.pkg)
+              }
+
+              private fun hide(app: AppItem) {
+                  val s = HashSet(hiddenSet())
+                  s.add(app.pkg)
+                  prefs.edit().putStringSet("hidden", s).apply()
+                  lastFocus = null
+                  render(null)
+              }
+
+              private fun showHidden() {
+                  val hidden = hiddenSet()
+                  val list = allApps.filter { it.pkg in hidden }
+                  if (list.isEmpty()) {
+                      Toast.makeText(this, "No tienes apps ocultas", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val names = list.map { it.label }.toTypedArray()
+                  dialog().setTitle("Elige una app para mostrarla").setItems(names) { _, which ->
+                      val s = HashSet(hiddenSet())
+                      s.remove(list[which].pkg)
+                      prefs.edit().putStringSet("hidden", s).apply()
+                      render(list[which].pkg)
+                  }.show()
+              }
+
+              private fun uninstall(app: AppItem) {
+                  val isSystem = try {
+                      (packageManager.getApplicationInfo(app.pkg, 0).flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                  } catch (e: Exception) {
+                      false
+                  }
+                  if (isSystem) {
+                      Toast.makeText(this, "Es una app del sistema y no se puede desinstalar", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  dialog().setTitle("\u00bfDesinstalar ${app.label}?")
+                      .setPositiveButton("Desinstalar") { _, _ ->
+                          try {
+                              startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + app.pkg)))
+                          } catch (e: Exception) {
+                              Toast.makeText(this, "No se pudo desinstalar", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              private fun info(app: AppItem) {
+                  try {
+                      startActivity(
+                          Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + app.pkg))
+                      )
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "No se pudo abrir la informaci\u00f3n", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun openSettings() {
+                  try {
+                      startActivity(Intent(Settings.ACTION_SETTINGS))
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "No se pudieron abrir los ajustes", Toast.LENGTH_SHORT).show()
+                  }
+              }
+          }
+          AURORA_EOF
+          mkdir -p app/src/main/java/com/aurora/launcher
+          cat > app/src/main/java/com/aurora/launcher/Art.kt <<'AURORA_EOF'
+          package com.aurora.launcher
+
+          import android.animation.Animator
+          import android.animation.AnimatorListenerAdapter
+          import android.animation.ValueAnimator
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.LinearGradient
+          import android.graphics.Matrix
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.RadialGradient
+          import android.graphics.Rect
+          import android.graphics.Shader
+          import android.view.View
+          import java.io.File
+          import java.util.Random
+
+          class Theme(st: Long, sm: Long, sb: Long, sunT: Long, sunB: Long, c1: Long, c2: Long, fl: Long, val seed: Long) {
+              val skyTop = st.toInt()
+              val skyMid = sm.toInt()
+              val skyBot = sb.toInt()
+              val sunTop = sunT.toInt()
+              val sunBot = sunB.toInt()
+              val a1 = c1.toInt()
+              val a2 = c2.toInt()
+              val floor = fl.toInt()
+          }
+
+          object Art {
+              val themes = listOf(
+                  Theme(0xFF0A0220, 0xFF2B0A57, 0xFFB0176E, 0xFFFFE066, 0xFFFF2E93, 0xFF00F0FF, 0xFFFF2BD6, 0xFF1A0733, 1),
+                  Theme(0xFF0B0006, 0xFF3A0716, 0xFFB3260E, 0xFFFFF176, 0xFFFF3D00, 0xFFFFD400, 0xFFFF1744, 0xFF2A0508, 2),
+                  Theme(0xFF000A06, 0xFF03221A, 0xFF0A6B4B, 0xFFCCFF90, 0xFF00E676, 0xFF00FF9C, 0xFF76FF03, 0xFF02160F, 3),
+                  Theme(0xFF020B1F, 0xFF0D2B5E, 0xFF2F80ED, 0xFFE0F7FF, 0xFF4FC3F7, 0xFF40C4FF, 0xFF7C4DFF, 0xFF071533, 4),
+                  Theme(0xFF1A0536, 0xFF6A1B9A, 0xFFFF7043, 0xFFFFF59D, 0xFFFF5722, 0xFFFFAB40, 0xFFE040FB, 0xFF240A3A, 5),
+                  Theme(0xFF0F0524, 0xFF3D1A78, 0xFF8E44AD, 0xFFF8BBD0, 0xFFAB47BC, 0xFFB388FF, 0xFFFF80AB, 0xFF1B0B35, 6),
+                  Theme(0xFF05000F, 0xFF2A0A4A, 0xFF5E1A8A, 0xFFEEFF41, 0xFF76FF03, 0xFFC6FF00, 0xFFD500F9, 0xFF150628, 7),
+                  Theme(0xFF050005, 0xFF2D0036, 0xFF9C0F48, 0xFFFFCDD2, 0xFFE91E63, 0xFFFF4081, 0xFF00E5FF, 0xFF1F0420, 8),
+                  Theme(0xFF00121A, 0xFF013A4D, 0xFF0B8793, 0xFFB2EBF2, 0xFF00BCD4, 0xFF1DE9B6, 0xFF18FFFF, 0xFF012530, 9),
+                  Theme(0xFF0D0A00, 0xFF3A2A05, 0xFFB36B00, 0xFFFFF8E1, 0xFFFFC107, 0xFFFFD740, 0xFFFF6E40, 0xFF2A1A03, 10),
+                  Theme(0xFF000428, 0xFF1A2A7A, 0xFFC2185B, 0xFFFFE0F0, 0xFFFF4081, 0xFF00B0FF, 0xFFFF4081, 0xFF0B1245, 11),
+                  Theme(0xFF050505, 0xFF1C1C24, 0xFF4A4A5A, 0xFFFFFFFF, 0xFF9E9EB8, 0xFFE0E0FF, 0xFF8C9EFF, 0xFF101018, 12)
+              )
+
+              fun a(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
+
+              private fun blend(c1: Int, c2: Int, f: Float): Int {
+                  val r = (Color.red(c1) * (1 - f) + Color.red(c2) * f).toInt()
+                  val g = (Color.green(c1) * (1 - f) + Color.green(c2) * f).toInt()
+                  val b = (Color.blue(c1) * (1 - f) + Color.blue(c2) * f).toInt()
+                  return Color.rgb(r, g, b)
+              }
+
+              fun render(t: Theme, w: Int, h: Int): Bitmap {
+                  val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                  val c = Canvas(bmp)
+                  val rnd = Random(t.seed)
+                  val wf = w.toFloat()
+                  val hf = h.toFloat()
+                  val hz = hf * 0.62f
+                  val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+                  p.shader = LinearGradient(0f, 0f, 0f, hz, intArrayOf(t.skyTop, t.skyMid, t.skyBot), floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP)
+                  c.drawRect(0f, 0f, wf, hz, p)
+                  p.shader = null
+                  for (i in 0 until 90) {
+                      p.color = Color.WHITE
+                      p.alpha = 60 + rnd.nextInt(160)
+                      c.drawCircle(rnd.nextFloat() * wf, rnd.nextFloat() * hz * 0.7f, 0.5f + rnd.nextFloat() * 1.2f, p)
+                  }
+
+                  // Sol retro con rayas
+                  val sr = hf * 0.17f
+                  val sx = wf * 0.70f
+                  val sy = hz - sr * 0.95f
+                  p.shader = RadialGradient(sx, sy, sr * 2.6f, intArrayOf(a(t.a2, 0x80), a(t.a2, 0)), null, Shader.TileMode.CLAMP)
+                  c.drawCircle(sx, sy, sr * 2.6f, p)
+                  val sun = Path()
+                  sun.addRect(sx - sr, sy - sr, sx + sr, sy, Path.Direction.CW)
+                  for (k in 0 until 6) {
+                      val top = sy + sr * (0.10f + k * 0.15f)
+                      sun.addRect(sx - sr, top, sx + sr, top + sr * (0.11f - k * 0.012f), Path.Direction.CW)
+                  }
+                  c.save()
+                  c.clipPath(sun)
+                  p.shader = LinearGradient(sx, sy - sr, sx, sy + sr, t.sunTop, t.sunBot, Shader.TileMode.CLAMP)
+                  c.drawCircle(sx, sy, sr, p)
+                  c.restore()
+                  p.shader = null
+
+                  // Ciudad
+                  skyline(c, p, rnd, wf, hz, hz * 0.50f, blend(t.skyBot, 0xFF000000.toInt(), 0.62f), t, false)
+                  skyline(c, p, rnd, wf, hz, hz * 0.34f, 0xFF04020A.toInt(), t, true)
+
+                  // Suelo con rejilla
+                  p.shader = LinearGradient(0f, hz, 0f, hf, t.floor, 0xFF05020A.toInt(), Shader.TileMode.CLAMP)
+                  c.drawRect(0f, hz, wf, hf, p)
+                  p.shader = null
+                  p.style = Paint.Style.STROKE
+                  val cx = wf * 0.5f
+                  for (pass in 0..1) {
+                      val wm = if (pass == 0) 4f else 1f
+                      val am = if (pass == 0) 0.25f else 1f
+                      for (k in 1..12) {
+                          val f = k / 12f
+                          val y = hz + (hf - hz) * f * f
+                          p.strokeWidth = (1f + f * 1.5f) * wm
+                          p.color = a(t.a1, ((70 + 150 * f) * am).toInt())
+                          c.drawLine(0f, y, wf, y, p)
+                      }
+                      for (i in -18..18) {
+                          p.strokeWidth = 1.4f * wm
+                          p.color = a(t.a1, (150 * am).toInt())
+                          c.drawLine(cx + i * wf * 0.012f, hz, cx + i * wf * 0.11f, hf, p)
+                      }
+                  }
+                  p.style = Paint.Style.FILL
+
+                  // Brillo del horizonte
+                  p.shader = LinearGradient(0f, hz - hf * 0.06f, 0f, hz, a(t.a2, 0), a(t.a2, 0xA0), Shader.TileMode.CLAMP)
+                  c.drawRect(0f, hz - hf * 0.06f, wf, hz, p)
+                  p.shader = null
+                  p.color = t.a1
+                  c.drawRect(0f, hz - 1f, wf, hz + 1f, p)
+
+                  // Vineta
+                  p.shader = RadialGradient(wf / 2f, hf / 2f, maxOf(wf, hf) * 0.75f, intArrayOf(0, 0, 0xAA000000.toInt()), floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP)
+                  c.drawRect(0f, 0f, wf, hf, p)
+                  p.shader = null
+                  return bmp
+              }
+
+              private fun skyline(c: Canvas, p: Paint, rnd: Random, w: Float, hz: Float, maxH: Float, color: Int, t: Theme, near: Boolean) {
+                  var x = -rnd.nextInt(20).toFloat()
+                  while (x < w) {
+                      val bw = w * (0.03f + rnd.nextFloat() * 0.05f)
+                      val bh = maxH * (0.25f + rnd.nextFloat() * 0.75f)
+                      p.color = color
+                      c.drawRect(x, hz - bh, x + bw, hz + 2f, p)
+                      if (rnd.nextInt(4) == 0) {
+                          c.drawRect(x + bw * 0.45f, hz - bh - maxH * 0.12f, x + bw * 0.55f, hz - bh, p)
+                      }
+                      if (near) {
+                          p.color = a(t.a1, 200)
+                          c.drawRect(x, hz - bh, x + bw, hz - bh + 1.5f, p)
+                          var wy = hz - bh + 6f
+                          while (wy < hz - 6f) {
+                              var wx = x + 4f
+                              while (wx < x + bw - 5f) {
+                                  if (rnd.nextInt(5) == 0) {
+                                      p.color = a(if (rnd.nextBoolean()) t.a1 else t.a2, 90 + rnd.nextInt(140))
+                                      c.drawRect(wx, wy, wx + 2f, wy + 3f, p)
+                                  }
+                                  wx += 6f
+                              }
+                              wy += 7f
+                          }
+                      }
+                      x += bw + rnd.nextInt(4)
+                  }
+              }
+
+              fun image(f: File, w: Int, h: Int): Bitmap? {
+                  return try {
+                      val o = BitmapFactory.Options()
+                      o.inJustDecodeBounds = true
+                      BitmapFactory.decodeFile(f.path, o)
+                      var s = 1
+                      while (o.outWidth / (s * 2) >= w) s *= 2
+                      val o2 = BitmapFactory.Options()
+                      o2.inSampleSize = s
+                      val src = BitmapFactory.decodeFile(f.path, o2) ?: return null
+                      val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                      val c = Canvas(out)
+                      val sc = maxOf(w / src.width.toFloat(), h / src.height.toFloat())
+                      val m = Matrix()
+                      m.postScale(sc, sc)
+                      m.postTranslate((w - src.width * sc) / 2f, (h - src.height * sc) / 2f)
+                      c.drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG))
+                      val p = Paint()
+                      p.shader = LinearGradient(0f, h * 0.45f, 0f, h.toFloat(), 0x00000000, 0xCC000000.toInt(), Shader.TileMode.CLAMP)
+                      c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+                      src.recycle()
+                      out
+                  } catch (e: Throwable) {
+                      null
+                  }
+              }
+          }
+
+          class CyberBg(ctx: Context) : View(ctx) {
+              private var cur: Bitmap? = null
+              private var prev: Bitmap? = null
+              private var fade = 1f
+              private var source: Any? = null
+              private var animate = false
+              private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+              private val dst = Rect()
+
+              fun show(src: Any, anim: Boolean) {
+                  source = src
+                  animate = anim
+                  if (width > 0 && height > 0) build()
+              }
+
+              override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+                  super.onSizeChanged(w, h, ow, oh)
+                  if (source != null && w > 0 && h > 0) {
+                      animate = false
+                      build()
+                  }
+              }
+
+              private fun build() {
+                  val w = width / 2
+                  val h = height / 2
+                  val s = source
+                  var bmp: Bitmap? = null
+                  if (s is File) bmp = Art.image(s, w, h)
+                  if (bmp == null) bmp = Art.render(if (s is Theme) s else Art.themes[0], w, h)
+                  prev = cur
+                  cur = bmp
+                  if (animate && prev != null) {
+                      val an = ValueAnimator.ofFloat(0f, 1f)
+                      an.duration = 800
+                      an.addUpdateListener {
+                          fade = it.animatedValue as Float
+                          invalidate()
+                      }
+                      an.addListener(object : AnimatorListenerAdapter() {
+                          override fun onAnimationEnd(a: Animator) {
+                              prev = null
+                          }
+                      })
+                      an.start()
+                  } else {
+                      prev = null
+                      fade = 1f
+                      invalidate()
+                  }
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  dst.set(0, 0, width, height)
+                  val pv = prev
+                  if (pv != null && fade < 1f) {
+                      paint.alpha = 255
+                      canvas.drawBitmap(pv, null, dst, paint)
+                  }
+                  val cu = cur ?: return
+                  paint.alpha = (fade * 255).toInt()
+                  canvas.drawBitmap(cu, null, dst, paint)
+              }
+          }
+          AURORA_EOF
+          mkdir -p app/src/main/java/com/aurora/launcher
+          cat > app/src/main/java/com/aurora/launcher/GlassDrawable.kt <<'AURORA_EOF'
+          package com.aurora.launcher
+
+          import android.graphics.Canvas
+          import android.graphics.ColorFilter
+          import android.graphics.LinearGradient
+          import android.graphics.Paint
+          import android.graphics.PixelFormat
+          import android.graphics.RectF
+          import android.graphics.Shader
+          import android.graphics.drawable.Drawable
+
+          class GlassDrawable(private val radius: Float, private val inset: Float, private val stroke: Float) : Drawable() {
+              private var a1 = 0xFF00E5FF.toInt()
+              private var a2 = 0xFFFF2BD6.toInt()
+              private var focused = false
+              private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val line = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val rect = RectF()
+
+              fun setAccent(x: Int, y: Int) {
+                  a1 = x
+                  a2 = y
+                  invalidateSelf()
+              }
+
+              override fun isStateful(): Boolean = true
+
+              override fun onStateChange(state: IntArray): Boolean {
+                  val f = state.contains(android.R.attr.state_focused)
+                  if (f == focused) return false
+                  focused = f
+                  invalidateSelf()
+                  return true
+              }
+
+              private fun al(c: Int, a: Int): Int = (c and 0x00FFFFFF) or (a shl 24)
+
+              override fun draw(canvas: Canvas) {
+                  val b = bounds
+                  rect.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset)
+                  val r = if (radius < 0f) rect.height() / 2f else radius
+
+                  if (focused) {
+                      line.style = Paint.Style.STROKE
+                      line.shader = null
+                      for (i in 6 downTo 1) {
+                          line.strokeWidth = i * inset / 3f
+                          line.color = al(a1, 22)
+                          canvas.drawRoundRect(rect, r, r, line)
+                      }
+                  }
+
+                  fill.style = Paint.Style.FILL
+                  val idle: Int = 0x66141C3C
+                  val top: Int = if (focused) al(a1, 0x66) else idle
+                  val bottom = if (focused) 0xB30A0620.toInt() else 0xA00A0620.toInt()
+                  fill.shader = LinearGradient(rect.left, rect.top, rect.left, rect.bottom, top, bottom, Shader.TileMode.CLAMP)
+                  canvas.drawRoundRect(rect, r, r, fill)
+
+                  val sheenTop: Int = 0x30FFFFFF
+                  val sheenBot: Int = 0x00FFFFFF
+                  fill.shader = LinearGradient(rect.left, rect.top, rect.left, rect.centerY(), sheenTop, sheenBot, Shader.TileMode.CLAMP)
+                  canvas.drawRoundRect(rect, r, r, fill)
+
+                  line.style = Paint.Style.STROKE
+                  line.strokeWidth = if (focused) stroke * 1.8f else stroke
+                  val al1 = al(a1, if (focused) 255 else 140)
+                  val al2 = al(a2, if (focused) 255 else 140)
+                  line.shader = LinearGradient(rect.left, rect.top, rect.right, rect.bottom, al1, al2, Shader.TileMode.CLAMP)
+                  canvas.drawRoundRect(rect, r, r, line)
+              }
+
+              override fun setAlpha(alpha: Int) {}
+
+              override fun setColorFilter(colorFilter: ColorFilter?) {}
+
+              @Deprecated("Deprecated in Java")
+              override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+          }
+          AURORA_EOF
+      - name: Compilar APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AuroraLauncher-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
